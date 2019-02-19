@@ -13,6 +13,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
@@ -137,20 +138,11 @@ public class BLEClient implements IBLEClient {
     }
 
     private void reConnectDevice(int status, final String macAddress) {
-        Log.d(TAG, "retryConnectDevice");
-        if (status == GATT_SUCCESS) {
-            Log.d(TAG, "connect...");
-            mHandler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    if (mBluetoothGatt != null) {
-                        mBluetoothGatt.connect();
-                    }
-                }
-            }, 1000);
-        } else {
+        Log.d(TAG, "reConnectDevice, mRetryCount: " + mRetryCount);
+
+        if (status != GATT_SUCCESS) {
             releaseBluetoothGatt();
-            connectGatt(macAddress, 1000);
+            connectGatt(macAddress, 500);
         }
     }
 
@@ -161,9 +153,11 @@ public class BLEClient implements IBLEClient {
      * @return retry result
      */
     private boolean retryConnectDevice(int status, String macAddress) {
-        if (mRetryCount < 3) {
-            reConnectDevice(status, macAddress);
+        Log.d(TAG, "retryConnectDevice, status: " + status + ", macAddress: " + macAddress);
+        if (status == GATT_SUCCESS) return false;
+        if (mRetryCount < 2) {
             mRetryCount ++;
+            reConnectDevice(status, macAddress);
             return true;
         }
         return false;
@@ -190,8 +184,10 @@ public class BLEClient implements IBLEClient {
                 mCurrentState = State.DISCONNECTED;
                 mIsInitSuccess = false;
                 Log.d(TAG, "STATE_DISCONNECTED---" + gatt.getDevice().getName() + "---" + gatt.getDevice().getAddress());
+                disConnectGatt();
                 releaseBluetoothGatt();
                 resetHasDiscoverServices();
+                if (retryConnectDevice(status, mCurrMacAddress)) return;
                 notifyOnDisConnected(new BtDevice(gatt.getDevice().getName(), gatt.getDevice().getAddress()));
             }
         }
@@ -453,7 +449,7 @@ public class BLEClient implements IBLEClient {
                 disconnect();
             }
         }
-
+        resetRetryCount();
         releaseBluetoothGatt();
         connectGatt(macAddress);
     }
@@ -475,7 +471,13 @@ public class BLEClient implements IBLEClient {
                     Log.d(TAG, "connectGatt..." + macAddress);
                     mCurrentState = State.CONNECTING;
                     mCurrMacAddress = macAddress;
-                    mBluetoothGatt = device.connectGatt(mContext, false, mGattCallback);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        //fix onConnectionStateChange status 133 bug
+                        mBluetoothGatt = device.connectGatt(mContext, false, mGattCallback, BluetoothDevice.TRANSPORT_LE);
+                    } else{
+                        mBluetoothGatt = device.connectGatt(mContext, false, mGattCallback);
+                    }
+
                 }
             }
         }, delayMs);
@@ -490,6 +492,9 @@ public class BLEClient implements IBLEClient {
             return;
         }
         if (mBluetoothGatt != null) {
+            if (mCurrentState == State.CONNECTING) {
+                mCurrentState = State.DISCONNECTED;
+            }
             resetHasDiscoverServices();
             disConnectGatt();
         }
@@ -680,6 +685,7 @@ public class BLEClient implements IBLEClient {
                         case BluetoothAdapter.STATE_ON:
                             mCurrentState = State.ON;
                             notifyStateChanged(State.ON);
+                            mCurrentState = State.DISCONNECTED;
                             break;
                         case BluetoothAdapter.STATE_TURNING_OFF:
                             mCurrentState = State.TURNING_OFF;
